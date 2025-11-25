@@ -1,354 +1,260 @@
-// server.js (updated - will try both ./HaasMachine and ./haasMachine)
-const express = require('express');
-const cors = require('cors');
-const http = require('http');
-const WebSocket = require('ws');
+// HaasMachine.js
+// Full machine simulation class and direct CommonJS export.
 
-let HaasMachine;
-try {
-  // try capitalized filename first (matches require in your code)
-  HaasMachine = require('./HaasMachine');
-} catch (err1) {
-  try {
-    // fallback to lowercase filename
-    HaasMachine = require('./haasMachine');
-  } catch (err2) {
-    console.error('Failed to require HaasMachine module. Tried ./HaasMachine and ./haasMachine');
-    console.error(err1 || err2);
-    process.exit(1);
+// =========================================================
+// ===============   H A A S   M A C H I N E   =============
+// =========================================================
+
+class HaasMachine {
+  constructor(id, name, type) {
+    this.id = id;
+    this.name = name;
+    this.type = type; // CNC, LATHE, PRESS_BRAKE, LASER
+
+    // Main State
+    this.power = true;
+    this.execution = 'IDLE';
+    this.spindleSpeed = 0;
+    this.spindleLoad = 0.0;
+    this.feedRate = 0;
+    this.partCount = 0;
+    this.axisPositions = { X: 0.0, Y: 0.0, Z: 0.0 };
+    this.alarm = null;
+
+    // Accumulated metrics
+    this.machineOnHours = 0.0;
+    this.spindleHours = 0.0;
+    this.totalCycles = 0;
+
+    // Temperature
+    this.temperature = 72;
+
+    // Tools (only for CNC / LATHE)
+    if (type === 'CNC' || type === 'LATHE') {
+      this.currentTool = 1;
+      this.tools = this._initializeTools();
+    }
+
+    // Coolant (only CNC / LATHE)
+    if (type === 'CNC' || type === 'LATHE') {
+      this.coolant = {
+        level: 100,
+        pressure: 50,
+        temperature: 72
+      };
+    }
+
+    // Materials
+    this.material = null;
+    this.programRunning = null;
+  }
+
+  // ---- Tool initialization ----
+  _initializeTools() {
+    const tools = [];
+    const toolCount = this.type === 'CNC' ? 24 : 12;
+    const toolTypes = ['DRILL', 'END_MILL', 'FACE_MILL', 'REAMER', 'TAP', 'BORING_BAR'];
+
+    for (let i = 1; i <= toolCount; i++) {
+      tools.push({
+        number: i,
+        type: toolTypes[Math.floor(Math.random() * toolTypes.length)],
+        diameter: (Math.random() * 20 + 2).toFixed(2),
+        length: (Math.random() * 100 + 50).toFixed(2),
+        currentLife: 100 - Math.random() * 80,
+        maxLife: 100,
+        description: `Tool ${i}`,
+        inUse: false
+      });
+    }
+    return tools;
+  }
+
+  // ---- JSON output ----
+  toJSON() {
+    const data = {
+      id: this.id,
+      name: this.name,
+      type: this.type,
+      power: this.power,
+      execution: this.execution,
+      spindleSpeed: this.spindleSpeed,
+      spindleLoad: this.spindleLoad,
+      feedRate: this.feedRate,
+      partCount: this.partCount,
+      axisPositions: this.axisPositions,
+      alarm: this.alarm,
+      machineOnHours: parseFloat(this.machineOnHours.toFixed(3)),
+      spindleHours: parseFloat(this.spindleHours.toFixed(3)),
+      totalCycles: this.totalCycles,
+      temperature: Math.round(this.temperature),
+      timestamp: new Date().toISOString()
+    };
+
+    if (this.type === 'CNC' || this.type === 'LATHE') {
+      data.currentTool = this.currentTool;
+      data.tools = this.tools;
+      data.coolant = this.coolant;
+    }
+
+    if (this.material) data.material = this.material;
+    if (this.programRunning) data.programRunning = this.programRunning;
+
+    return data;
+  }
+
+  // ---- Machine update loop ----
+  update(dtSec) {
+    if (!this.power) {
+      this.execution = 'STOPPED';
+      this.spindleSpeed = 0;
+      this.spindleLoad = 0.0;
+      this.feedRate = 0;
+      this.alarm = null;
+      return;
+    }
+
+    this.machineOnHours += dtSec / 3600.0;
+
+    if (this.alarm) {
+      this.execution = 'ALARM';
+      this.spindleSpeed = 0;
+      this.spindleLoad = 0;
+      this.feedRate = 0;
+
+      if (Math.random() < 0.01) {
+        this.alarm = null;
+        this.execution = 'IDLE';
+      }
+      return;
+    }
+
+    let runProbability = 0.6;
+    if (this.type === 'LASER') runProbability = 0.7;
+    else if (this.type === 'PRESS_BRAKE') runProbability = 0.5;
+
+    // Running cycle
+    if (Math.random() < runProbability) {
+      this.execution = 'RUNNING';
+
+      if (this.type === 'CNC' || this.type === 'LATHE') {
+        this._updateCNCCycle(dtSec);
+      }
+      else if (this.type === 'PRESS_BRAKE') {
+        this._updatePressBrakeCycle();
+      }
+      else if (this.type === 'LASER') {
+        this._updateLaserCycle();
+      }
+
+      this.temperature = Math.min(120, this.temperature + Math.random() * 0.5);
+
+      if (Math.random() < 0.1) {
+        this.partCount++;
+        this.totalCycles++;
+      }
+
+      this._checkAlarms();
+    }
+
+    // Idle
+    else {
+      this.execution = 'IDLE';
+      this.spindleSpeed = 0;
+      this.spindleLoad = 0;
+      this.feedRate = 0;
+      this.temperature = Math.max(72, this.temperature - Math.random() * 0.3);
+
+      this.axisPositions.X += Math.random() * 0.02 - 0.01;
+      this.axisPositions.Y += Math.random() * 0.02 - 0.01;
+      this.axisPositions.Z += Math.random() * 0.02 - 0.01;
+
+      if (this.coolant) {
+        this.coolant.level = Math.min(100, this.coolant.level + 0.1);
+      }
+    }
+  }
+
+  // ---- CNC Cycle ----
+  _updateCNCCycle(dtSec) {
+    this.spindleSpeed = Math.floor(Math.random() * (12000 - 1500) + 1500);
+    this.spindleLoad = parseFloat((Math.random() * 80 + 10).toFixed(1));
+    this.feedRate = Math.floor(Math.random() * (3000 - 200) + 200);
+
+    this.axisPositions.X += Math.random() - 0.5;
+    this.axisPositions.Y += Math.random() - 0.5;
+    this.axisPositions.Z += Math.random() * 0.4 - 0.2;
+
+    this.spindleHours += dtSec / 3600.0;
+
+    const T = this.tools[this.currentTool - 1];
+    if (T && this.spindleSpeed > 0) {
+      T.currentLife = Math.max(0, T.currentLife - Math.random() * 0.01);
+      T.inUse = true;
+    }
+
+    if (this.coolant) {
+      this.coolant.level = Math.max(0, this.coolant.level - Math.random() * 0.05);
+      this.coolant.pressure = 50 + Math.random() * 20 - 10;
+      this.coolant.temperature = 72 + Math.random() * 15;
+    }
+
+    if (!this.programRunning && Math.random() < 0.1) {
+      this.programRunning = `O${Math.floor(Math.random() * 9000 + 1000)}`;
+    }
+  }
+
+  // ---- Press Brake ----
+  _updatePressBrakeCycle() {
+    this.spindleSpeed = 0;
+    this.spindleLoad = parseFloat((Math.random() * 75 + 20).toFixed(1));
+    this.feedRate = Math.floor(Math.random() * 60 + 20);
+    this.axisPositions.Y += Math.random() * 2 - 1;
+  }
+
+  // ---- Laser ----
+  _updateLaserCycle() {
+    this.spindleSpeed = 0;
+    this.spindleLoad = parseFloat((Math.random() * 70 + 30).toFixed(1));
+    this.feedRate = Math.floor(Math.random() * 5500 + 500);
+    this.axisPositions.X += Math.random() * 10 - 5;
+    this.axisPositions.Y += Math.random() * 10 - 5;
+  }
+
+  // ---- Alarm logic ----
+  _checkAlarms() {
+    if (this.type === 'CNC' || this.type === 'LATHE') {
+      if (this.spindleLoad > 85 && Math.random() < 0.05) this.alarm = 'SPINDLE_OVERLOAD';
+      else if (Math.random() < 0.02) this.alarm = 'AXIS_FOLLOWING_ERROR';
+      else if (this.coolant && this.coolant.level < 10 && Math.random() < 0.1) this.alarm = 'LOW_COOLANT';
+      else if (this.temperature > 110 && Math.random() < 0.1) this.alarm = 'HIGH_TEMPERATURE';
+      else {
+        const T = this.tools[this.currentTool - 1];
+        if (T && T.currentLife < 5 && Math.random() < 0.15) {
+          this.alarm = 'TOOL_LIFE_EXPIRED';
+        }
+      }
+    }
+
+    if (this.type === 'PRESS_BRAKE' && this.spindleLoad > 90 && Math.random() < 0.1) {
+      this.alarm = 'OVER_TONNAGE';
+    }
+
+    if (this.type === 'LASER' && this.spindleLoad > 95 && Math.random() < 0.1) {
+      this.alarm = 'LASER_POWER_FAULT';
+    }
+  }
+
+  injectAlarm(code) {
+    this.alarm = code;
+    this.execution = 'ALARM';
+  }
+
+  clearAlarm() {
+    this.alarm = null;
+    this.execution = 'IDLE';
   }
 }
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Definición de planta (múltiples máquinas)
-const machines = {
-  haas_vf2: new HaasMachine('haas_vf2', 'Haas VF-2', 'CNC'),
-  toyoda_hmc: new HaasMachine('toyoda_hmc', 'Toyoda HMC', 'CNC'),
-  durma_press: new HaasMachine('durma_press', 'Durma Press Brake', 'PRESS_BRAKE'),
-  cnc_lathe: new HaasMachine('cnc_lathe', 'CNC Lathe', 'LATHE'),
-  fiber_laser: new HaasMachine('fiber_laser', 'Fiber Laser', 'LASER'),
-};
-
-// Set some initial states for variety
-machines.haas_vf2.material = 'Aluminum 6061';
-machines.haas_vf2.programRunning = 'O1234';
-machines.toyoda_hmc.material = 'Steel 4140';
-machines.cnc_lathe.material = 'Brass C360';
-
-const SIM_UPDATE_PERIOD_MS = 1000; // 1 segundo
-
-// Simulación continua
-setInterval(() => {
-  const dtSec = SIM_UPDATE_PERIOD_MS / 1000.0;
-  
-  Object.values(machines).forEach(machine => {
-    if (typeof machine.update === 'function') {
-      machine.update(dtSec);
-    }
-  });
-
-  // Broadcast updates to WebSocket clients
-  const plantData = {
-    type: 'PLANT_UPDATE',
-    timestamp: new Date().toISOString(),
-    machines: Object.values(machines).map(m => (typeof m.toJSON === 'function' ? m.toJSON() : m))
-  };
-
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(plantData));
-    }
-  });
-}, SIM_UPDATE_PERIOD_MS);
-
-// ==================== API Routes ====================
-
-// Root - API Info
-app.get('/', (req, res) => {
-  res.json({
-    name: 'Multi-Machine CNC Simulator API',
-    version: '2.0.0',
-    endpoints: {
-      machines: {
-        'GET /api/machines': 'List all machines',
-        'GET /api/machines/:id': 'Get specific machine data',
-        'POST /api/machines/:id/power': 'Toggle machine power',
-        'POST /api/machines/:id/alarm': 'Inject alarm',
-        'DELETE /api/machines/:id/alarm': 'Clear alarm'
-      },
-      plant: {
-        'GET /api/plant/status': 'Overall plant status',
-        'GET /api/plant/alarms': 'Active alarms across all machines',
-        'GET /api/plant/production': 'Production summary'
-      },
-      legacy: {
-        'GET /api/status': 'Legacy endpoint (Haas VF-2 only)',
-        'GET /api/tools': 'Legacy tools endpoint (Haas VF-2 only)'
-      }
-    },
-    websocket: 'ws://[host]/ws for real-time updates'
-  });
-});
-
-// List all machines
-app.get('/api/machines', (req, res) => {
-  const machineList = Object.values(machines).map(m => (typeof m.toJSON === 'function' ? m.toJSON() : m));
-  res.json(machineList);
-});
-
-// Get specific machine
-app.get('/api/machines/:id', (req, res) => {
-  const machine = machines[req.params.id];
-  if (!machine) {
-    return res.status(404).json({ error: 'Machine not found' });
-  }
-  res.json(typeof machine.toJSON === 'function' ? machine.toJSON() : machine);
-});
-
-// Toggle machine power
-app.post('/api/machines/:id/power', (req, res) => {
-  const machine = machines[req.params.id];
-  if (!machine) {
-    return res.status(404).json({ error: 'Machine not found' });
-  }
-  
-  const { power } = req.body;
-  if (typeof power === 'boolean') {
-    machine.power = power;
-  } else {
-    machine.power = !machine.power;
-  }
-  
-  res.json({
-    id: machine.id,
-    name: machine.name,
-    power: machine.power
-  });
-});
-
-// Inject alarm
-app.post('/api/machines/:id/alarm', (req, res) => {
-  const machine = machines[req.params.id];
-  if (!machine) {
-    return res.status(404).json({ error: 'Machine not found' });
-  }
-  
-  const { alarm } = req.body;
-  if (typeof machine.injectAlarm === 'function') {
-    machine.injectAlarm(alarm || 'TEST_ALARM');
-  } else {
-    machine.alarm = alarm || 'TEST_ALARM';
-    machine.execution = 'ALARM';
-  }
-  
-  res.json({
-    id: machine.id,
-    name: machine.name,
-    alarm: machine.alarm,
-    execution: machine.execution
-  });
-});
-
-// Clear alarm
-app.delete('/api/machines/:id/alarm', (req, res) => {
-  const machine = machines[req.params.id];
-  if (!machine) {
-    return res.status(404).json({ error: 'Machine not found' });
-  }
-  
-  if (typeof machine.clearAlarm === 'function') {
-    machine.clearAlarm();
-  } else {
-    machine.alarm = null;
-    machine.execution = 'IDLE';
-  }
-  
-  res.json({
-    id: machine.id,
-    name: machine.name,
-    alarm: machine.alarm,
-    execution: machine.execution
-  });
-});
-
-// Plant status overview
-app.get('/api/plant/status', (req, res) => {
-  const machineList = Object.values(machines);
-  
-  const status = {
-    totalMachines: machineList.length,
-    running: machineList.filter(m => m.execution === 'RUNNING').length,
-    idle: machineList.filter(m => m.execution === 'IDLE').length,
-    alarm: machineList.filter(m => m.execution === 'ALARM').length,
-    stopped: machineList.filter(m => m.execution === 'STOPPED').length,
-    totalPartCount: machineList.reduce((sum, m) => sum + (m.partCount || 0), 0),
-    totalMachineHours: machineList.reduce((sum, m) => sum + (m.machineOnHours || 0), 0),
-    totalCycles: machineList.reduce((sum, m) => sum + (m.totalCycles || 0), 0),
-    timestamp: new Date().toISOString()
-  };
-  
-  res.json(status);
-});
-
-// Active alarms
-app.get('/api/plant/alarms', (req, res) => {
-  const alarms = Object.values(machines)
-    .filter(m => m.alarm)
-    .map(m => ({
-      machineId: m.id,
-      machineName: m.name,
-      machineType: m.type,
-      alarm: m.alarm,
-      execution: m.execution,
-      timestamp: new Date().toISOString()
-    }));
-  
-  res.json(alarms);
-});
-
-// Production summary
-app.get('/api/plant/production', (req, res) => {
-  const production = Object.values(machines).map(m => ({
-    id: m.id,
-    name: m.name,
-    type: m.type,
-    partCount: m.partCount,
-    totalCycles: m.totalCycles,
-    machineOnHours: parseFloat((m.machineOnHours || 0).toFixed(2)),
-    spindleHours: parseFloat(((m.spindleHours || 0)).toFixed(2)),
-    execution: m.execution
-  }));
-  
-  res.json(production);
-});
-
-// ==================== Legacy Endpoints (Backward Compatibility) ====================
-
-// Legacy status endpoint (Haas VF-2 only)
-app.get('/api/status', (req, res) => {
-  const haas = machines.haas_vf2;
-  if (!haas) return res.status(404).json({ error: 'Haas VF-2 not found' });
-  
-  const legacyData = {
-    status: haas.execution,
-    model: haas.name,
-    serialNumber: `${new Date().getFullYear()}${Math.floor(Math.random() * 100000000)}`,
-    data: {
-      spindle: {
-        speed: haas.spindleSpeed,
-        load: haas.spindleLoad,
-        temperature: haas.temperature
-      },
-      axes: {
-        x: {
-          position: parseFloat((haas.axisPositions?.X || 0).toFixed(4)),
-          load: parseFloat((Math.random() * 30 + 10).toFixed(1)),
-          temperature: haas.temperature - 5
-        },
-        y: {
-          position: parseFloat((haas.axisPositions?.Y || 0).toFixed(4)),
-          load: parseFloat((Math.random() * 30 + 10).toFixed(1)),
-          temperature: haas.temperature - 5
-        },
-        z: {
-          position: parseFloat((haas.axisPositions?.Z || 0).toFixed(4)),
-          load: parseFloat((Math.random() * 30 + 10).toFixed(1)),
-          temperature: haas.temperature - 5
-        }
-      },
-      feedRate: {
-        current: haas.feedRate,
-        override: 100
-      },
-      partsCount: haas.partCount,
-      cycleTime: Math.floor((haas.totalCycles || 0) * 120),
-      powerOnTime: Math.floor((haas.machineOnHours || 0) * 3600),
-      currentTool: haas.currentTool || 1,
-      toolLife: haas.tools || [],
-      coolant: haas.coolant || { level: 100, pressure: 50, temperature: 72 },
-      alarms: haas.alarm ? [{
-        code: haas.alarm,
-        message: haas.alarm.replace(/_/g, ' '),
-        severity: 'CRITICAL',
-        timestamp: new Date().toISOString()
-      }] : [],
-      programRunning: haas.programRunning,
-      hydraulics: {
-        pressure: 800 + Math.random() * 200,
-        temperature: haas.temperature
-      }
-    }
-  };
-  
-  res.json(legacyData);
-});
-
-// Legacy tools endpoint
-app.get('/api/tools', (req, res) => {
-  const haas = machines.haas_vf2;
-  res.json(haas.tools || []);
-});
-
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ==================== WebSocket ====================
-
-wss.on('connection', (ws) => {
-  console.log('🔌 New WebSocket client connected');
-  
-  // Send initial state
-  ws.send(JSON.stringify({
-    type: 'CONNECTED',
-    message: 'Connected to Multi-Machine CNC Simulator',
-    machines: Object.keys(machines)
-  }));
-  
-  ws.on('close', () => {
-    console.log('🔌 WebSocket client disconnected');
-  });
-});
-
-// ==================== Start Server ====================
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log('');
-  console.log('🏭 ===============================================');
-  console.log('🏭 Multi-Machine CNC Simulator');
-  console.log('🏭 ===============================================');
-  console.log('');
-  console.log(`📊 REST API: http://localhost:${PORT}`);
-  console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
-  console.log('');
-  console.log('📋 Available Machines:');
-  Object.values(machines).forEach(m => {
-    console.log(`   - ${m.name} (${m.id}) - ${m.type}`);
-  });
-  console.log('');
-  console.log('🔗 Endpoints:');
-  console.log(`   - GET  http://localhost:${PORT}/api/machines`);
-  console.log(`   - GET  http://localhost:${PORT}/api/plant/status`);
-  console.log(`   - GET  http://localhost:${PORT}/api/plant/alarms`);
-  console.log('');
-  console.log('🎯 Legacy Endpoints (backward compatible):');
-  console.log(`   - GET  http://localhost:${PORT}/api/status`);
-  console.log(`   - GET  http://localhost:${PORT}/api/tools`);
-  console.log('');
-  console.log('✅ Server running!');
-  console.log('');
-});
+// ---- Export the class directly ----
+module.exports = HaasMachine;
