@@ -1,3 +1,4 @@
+// haasMachine.js
 class HaasMachine {
   constructor(id, name, type) {
     this.id = id;
