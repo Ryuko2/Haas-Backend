@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const WebSocket = require('ws');
-const MachineState = require('./MachineState');
+const HaasMachine = require('./HaasMachine');
 
 const app = express();
 const server = http.createServer(app);
@@ -14,11 +14,11 @@ app.use(express.json());
 
 // Definición de planta (múltiples máquinas)
 const machines = {
-  haas_vf2: new MachineState('haas_vf2', 'Haas VF-2', 'CNC'),
-  toyoda_hmc: new MachineState('toyoda_hmc', 'Toyoda HMC', 'CNC'),
-  durma_press: new MachineState('durma_press', 'Durma Press Brake', 'PRESS_BRAKE'),
-  cnc_lathe: new MachineState('cnc_lathe', 'CNC Lathe', 'LATHE'),
-  fiber_laser: new MachineState('fiber_laser', 'Fiber Laser', 'LASER'),
+  haas_vf2: new HaasMachine('haas_vf2', 'Haas VF-2', 'CNC'),
+  toyoda_hmc: new HaasMachine('toyoda_hmc', 'Toyoda HMC', 'CNC'),
+  durma_press: new HaasMachine('durma_press', 'Durma Press Brake', 'PRESS_BRAKE'),
+  cnc_lathe: new HaasMachine('cnc_lathe', 'CNC Lathe', 'LATHE'),
+  fiber_laser: new HaasMachine('fiber_laser', 'Fiber Laser', 'LASER'),
 };
 
 // Set some initial states for variety
