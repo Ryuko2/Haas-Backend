@@ -292,6 +292,33 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log('🔌 WebSocket client disconnected');
   });
+  // Add new machine endpoint
+app.post('/api/machines/add', (req, res) => {
+  const { id, name, type, ip, port } = req.body;
+  
+  if (!id || !name || !type) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
+  if (machines[id]) {
+    return res.status(409).json({ error: 'Machine ID already exists' });
+  }
+  
+  // Create new machine
+  const MachineState = require('./MachineState');
+  machines[id] = new MachineState(id, name, type);
+  
+  if (ip) machines[id].ip = ip;
+  if (port) machines[id].port = port;
+  
+  console.log(`✅ New machine added: ${name} (${id})`);
+  
+  res.json({
+    success: true,
+    machine: machines[id].toJSON()
+  });
+});
+
 });
 
 // ==================== Start Server ====================
