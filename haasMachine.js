@@ -268,4 +268,4 @@ class HaasMachine {
   }
 }
 
-module.exports = MachineState;
+module.exports = HaasMachine;
