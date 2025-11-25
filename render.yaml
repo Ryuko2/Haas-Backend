@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: haas-backend-fyke
+    runtime: node
+    repo: https://github.com/Ryuko2/Haas-Backend
+    branch: main
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+    plan: free
